@@ -1,0 +1,15 @@
+{
+  "name": "my903-scraper",
+  "version": "0.0.1",
+  "description": "scrape my903.tk and extract mp3 sources",
+  "main": "server.js",
+  "repository": "",
+  "author": "Samson Hu <homywu@gmail.com>",
+  "dependencies": {
+    "async": "~0.2.8",
+    "express": "~3.2.4",
+    "request": "latest",
+    "cheerio": "latest",
+    "socket.io": "~0.9.14"
+  }
+}
