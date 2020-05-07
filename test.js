@@ -1,175 +1,329 @@
-const { pick } = require('lodash');
+const mongoose = require('mongoose');
 
-const { STATUS_OK } = require('@constants/Response');
-const BaseController = require('./BaseController');
+const ProductSynchronizer = require(`@services/ProductSynchronizer`);
+const SlFactory = require('../factories/SlFactory');
 
+describe('#execute', () => {
+  let product;
+  let subject;
+  let productInfo;
+  let sychronizer;
+  let productId;
 
-class ProductsController extends BaseController {
-  async index(req, res) {
-    let data;
-    try {
-      let defaultParams = {
-        fields: [
-          'id',
-          'status',
-          'title_translations',
-          'same_price',
-          'price',
-          'price_sale',
-          'lowest_price',
-          'quantity',
-          'unlimited_quantity',
-          'variant_options',
-          'variations.id',
-          'variations.fields_translations',
-          'variations.price',
-          'variations.price_sale',
-          'variations.quantity',
-          'variations.unlimited_quantity',
-          'variations.media.images.thumb',
-          'variations.media.images.original',
-          'variations.sku',
-          'variations.variant_option_ids',
-          'medias.images.thumb',
-          'medias.images.original',
-        ]
-          .map((k) => `items.${k}`)
-          .concat(['pagination']),
+  beforeEach(async () => {
+    productId = new mongoose.Types.ObjectId();
+
+    subject = async () => {
+      sychronizer = new ProductSynchronizer(productId);
+      jest.spyOn(OpenApiClient, 'request').mockResolvedValue(productInfo);
+      await sychronizer.execute();
+      return Product.findOne({ _id: product._id });
+    };
+  });
+
+  describe('product removed', () => {
+    beforeEach(async () => {
+      product = await SlFactory.create('Product', { productId });
+      productInfo = {
+        status: 'removed',
       };
-      const { page, categoryId, name } = this.params(req);
-      defaultParams = {
-        ...defaultParams,
-        page: page || 1,
-        per_page: 24,
-      };
+    });
 
-      const useSearch = categoryId || name;
-      if (useSearch) {
-        const params = {
-          ...defaultParams,
-        };
-        if (categoryId) {
-          params.category_id = categoryId;
-        }
-        if (name) {
-          params.title_translations = name;
-        }
-        data = await OpenApiClient.request({
-          url: 'products/search',
-          params,
-          accessToken: res.locals.accessToken,
-        });
-      } else {
-        data = await OpenApiClient.request({
-          url: 'products',
-          params: defaultParams,
-          accessToken: res.locals.accessToken,
-        });
-      }
-      return helpers.renderJson(res, new helpers.JsonResponse(data, STATUS_OK));
-    } catch (ex) {
-      return this.renderError(ex, res, 'index', 'Unable to get products');
-    }
-  }
+    test('product removed', async () => {
+      const result = await subject();
+      expect(result.deletedAt).toBeInstanceOf(Date);
+    });
+  });
 
-  async updateSaleEventProducts(req, res) {
-    try {
-      const host = await this.constructor.getHost(req.params.merchantId);
-      const saleEvent = await this.constructor.getSaleEvent({
-        saleEventId: req.params.saleEventId,
-        merchantId: req.params.merchantId,
-      });
-
-      const products = await Product.findByQueryObj({
-        saleEvent, deletedAt: null,
-      });
-
-      if (!saleEvent) {
-        throw new Errors_UnprocessableEntityError('Unable to find saleEvent', { code: 'SALE_EVENT_NOT_FOUND' });
-      }
-
-      const productsPayload = ProductService.prepareProductsPayload(
-        req.body.products, products, host._id, saleEvent._id,
-      );
-
-      const upsertedProducts = await Product.upsertMany(productsPayload);
-      const result = {
-        items: upsertedProducts.map((e) => e.toAdminObject()),
-      };
-      return helpers.renderJson(res, new helpers.JsonResponse(result, STATUS_OK));
-    } catch (ex) {
-      return this.renderError(ex, res, 'updateSaleEventProducts', 'Unable to update products');
-    }
-  }
-
-  async getSaleEventProducts(req, res) {
-    try {
-      const whiteList = ['saleEvent', 'host', 'deletedAt'];
-      const isPublicAccess = (req.path || '').indexOf('/merchants') < 0;
-      const saleEvent = await this.constructor.getSaleEvent({
-        saleEventId: req.params.saleEventId,
-        merchantId: isPublicAccess ? null : req.params.merchantId,
-      });
-      if (!saleEvent) {
-        throw new Errors_NotFoundError('Unable to find saleEvent', { code: 'SALE_EVENT_NOT_FOUND' });
-      }
-      const {
-        queryObj, page, offset, limit,
-      } = helpers.getQueryObj(
-        { ...req.query, saleEvent: saleEvent._id, deletedAt: null },
-        whiteList,
-      );
-      if (isPublicAccess !== true) {
-        queryObj.host = saleEvent.host;
-      } else {
-        queryObj.status = { $in: ['active', 'hidden'] };
-      }
-      const [products, total] = await Promise.all([
-        Product.findByQueryObj({ ...queryObj }, offset, limit),
-        Product.countByQueryObj(queryObj),
-      ]);
-      const result = {
-        items: products.map((p) => (isPublicAccess ? p.toPublicObject() : p.toAdminObject())),
-        page,
-        offset,
-        limit,
-        total,
-      };
-      return helpers.renderJson(res, new helpers.JsonResponse(result, STATUS_OK));
-    } catch (e) {
-      return this.renderError(e, res, 'products', 'Unable to get products of sale event');
-    }
-  }
-
-  async removeSaleEventProducts(req, res) {
-    try {
-      const host = await this.constructor.getHost(req.params.merchantId);
-      const saleEvent = await this.constructor.getSaleEvent({
-        saleEventId: req.params.saleEventId,
-        merchantId: req.params.merchantId,
-      });
-
-      if (!saleEvent) {
-        throw new Errors_NotFoundError('Unable to find saleEvent', { code: 'SALE_EVENT_NOT_FOUND' });
-      }
-
-      await Promise.map(req.body.products, async (product) => {
-        const criteria = pick(
+  describe('without variations', () => {
+    beforeEach(async () => {
+      product = await SlFactory.create('Product', { productId });
+      productInfo = {
+        price: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        medias: [
           {
-            ...product,
-            host: host._id,
-            saleEvent: saleEvent._id,
+            images: {
+              thumb: {
+                url: 'thumb_url',
+              },
+              original: {
+                url: 'original_url',
+              },
+            },
           },
-          ['saleEvent', 'host', 'productId', 'variationId'],
-        );
-        return Product.updateMany(criteria, { deletedAt: Date.now() });
-      });
+        ],
+        variations: [],
+      };
+    });
 
-      return helpers.renderJson(res, new helpers.JsonResponse({}, STATUS_OK));
-    } catch (e) {
-      return this.renderError(e, res, 'products', 'Unable to delete products of sale event');
-    }
-  }
-}
+    test('product attrs updated', async () => {
+      const result = await subject();
+      expect(result.price.cents).toEqual(100);
+      expect(result.media.get('images').thumb).toEqual('thumb_url');
+    });
+  });
 
-module.exports = ProductsController;
+  describe('with variations && same_price === false', () => {
+    beforeEach(async () => {
+      const variationId = new mongoose.Types.ObjectId();
+      product = await SlFactory.create('Product', { variationId, productId });
+      productInfo = {
+        same_price: false,
+        price: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        unlimited_quantity: true,
+        medias: [
+          {
+            images: {
+              thumb: {
+                url: 'thumb_url',
+              },
+              original: {
+                url: 'original_url',
+              },
+            },
+          },
+        ],
+        variations: [
+          {
+            id: variationId.toString(),
+            price: {
+              cents: 50,
+              dollars: 50,
+              currency_iso: 'TWD',
+            },
+            price_sale: {
+              cents: 50,
+              dollars: 50,
+              currency_iso: 'TWD',
+            },
+            unlimited_quantity: null,
+            media: {
+              images: {
+                thumb: {
+                  url: 'var_thumb_url',
+                },
+                original: {
+                  url: 'var_original_url',
+                },
+              },
+            },
+            fields_translations: {
+              en: ['Blue', 'L'],
+            },
+          }
+        ],
+      };
+    });
+
+    test('variation attrs updated', async () => {
+      const result = await subject();
+      expect(result.price.cents).toEqual(50);
+      expect(result.unlimitedQuantity).toEqual(true);
+      expect(result.media.get('images').thumb).toEqual('var_thumb_url');
+      expect(result.variationFieldsTranslations.en).toEqual(expect.arrayContaining(['Blue', 'L']));
+    });
+  });
+
+  describe('with variations without price && same_price === false', () => {
+    beforeEach(async () => {
+      const variationId = new mongoose.Types.ObjectId();
+      product = await SlFactory.create('Product', { variationId, productId });
+      productInfo = {
+        same_price: false,
+        price: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        price_sale: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        unlimited_quantity: true,
+        medias: [
+          {
+            images: {
+              thumb: {
+                url: 'thumb_url',
+              },
+              original: {
+                url: 'original_url',
+              },
+            },
+          },
+        ],
+        variations: [
+          {
+            id: variationId.toString(),
+            unlimited_quantity: null,
+            media: {
+              images: {
+                thumb: {
+                  url: 'var_thumb_url',
+                },
+                original: {
+                  url: 'var_original_url',
+                },
+              },
+            },
+            fields_translations: {
+              en: ['Blue', 'L'],
+            },
+          }
+        ],
+      };
+    });
+
+    test('variation attrs updated', async () => {
+      const result = await subject();
+      expect(result.price).toEqual(null);
+      expect(result.unlimitedQuantity).toEqual(true);
+      expect(result.media.get('images').thumb).toEqual('var_thumb_url');
+      expect(result.variationFieldsTranslations.en).toEqual(expect.arrayContaining(['Blue', 'L']));
+    });
+  });
+
+  describe('with variations with price cents 0 && same_price === false', () => {
+    beforeEach(async () => {
+      const variationId = new mongoose.Types.ObjectId();
+      product = await SlFactory.create('Product', { variationId, productId });
+      productInfo = {
+        same_price: false,
+        price: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        price_sale: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        unlimited_quantity: true,
+        medias: [
+          {
+            images: {
+              thumb: {
+                url: 'thumb_url',
+              },
+              original: {
+                url: 'original_url',
+              },
+            },
+          },
+        ],
+        variations: [
+          {
+            id: variationId.toString(),
+            unlimited_quantity: null,
+            price: {
+              cents: 0,
+              dollars: 0,
+              currency_iso: 'TWD',
+            },
+            media: {
+              images: {
+                thumb: {
+                  url: 'var_thumb_url',
+                },
+                original: {
+                  url: 'var_original_url',
+                },
+              },
+            },
+            fields_translations: {
+              en: ['Blue', 'L'],
+            },
+          }
+        ],
+      };
+    });
+
+    test('variation attrs updated', async () => {
+      const result = await subject();
+      expect(result.price.cents).toEqual(0);
+      expect(result.unlimitedQuantity).toEqual(true);
+      expect(result.media.get('images').thumb).toEqual('var_thumb_url');
+      expect(result.variationFieldsTranslations.en).toEqual(expect.arrayContaining(['Blue', 'L']));
+    });
+  });
+
+  describe('with variations && same_price === true', () => {
+    beforeEach(async () => {
+      const variationId = new mongoose.Types.ObjectId();
+      product = await SlFactory.create('Product', { variationId, productId });
+      productInfo = {
+        same_price: true,
+        price: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        price_sale: {
+          cents: 100,
+          dollars: 100,
+          currency_iso: 'TWD',
+        },
+        unlimited_quantity: true,
+        medias: [
+          {
+            images: {
+              thumb: {
+                url: 'thumb_url',
+              },
+              original: {
+                url: 'original_url',
+              },
+            },
+          },
+        ],
+        variations: [
+          {
+            id: variationId.toString(),
+            price: {
+              cents: 50,
+              dollars: 50,
+              currency_iso: 'TWD',
+            },
+            price_sale: {
+              cents: 50,
+              dollars: 50,
+              currency_iso: 'TWD',
+            },
+            unlimited_quantity: null,
+            media: {
+              images: {
+                thumb: {
+                  url: 'var_thumb_url',
+                },
+                original: {
+                  url: 'var_original_url',
+                },
+              },
+            },
+            fields_translations: {
+              en: ['Blue', 'L'],
+            },
+          }
+        ],
+      };
+    });
+
+    test('variation attrs updated', async () => {
+      const result = await subject();
+      expect(result.price.cents).toEqual(100);
+      expect(result.unlimitedQuantity).toEqual(true);
+      expect(result.media.get('images').thumb).toEqual('var_thumb_url');
+      expect(result.variationFieldsTranslations.en).toEqual(expect.arrayContaining(['Blue', 'L']));
+    });
+  });
+});
